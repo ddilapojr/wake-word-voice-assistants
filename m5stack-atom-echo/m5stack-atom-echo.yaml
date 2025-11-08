@@ -26,6 +26,13 @@ wifi:
 
 captive_portal:
 
+# Add globals for TTS routing
+globals:
+  - id: tts_target_media_player
+    type: std::string
+    restore_value: true
+    initial_value: '""'
+
 button:
   - platform: factory_reset
     id: factory_reset_btn
@@ -52,12 +59,12 @@ speaker:
     dac_type: external
     bits_per_sample: 16bit
     sample_rate: 16000
-    channel: stereo  # The Echo has poor playback audio quality when using mon audio
+    channel: stereo
     buffer_duration: 60ms
 
 media_player:
   - platform: speaker
-    name: None
+    name: Media Player
     id: echo_media_player
     announcement_pipeline:
       speaker: echo_speaker
@@ -68,6 +75,8 @@ media_player:
     files:
       - id: timer_finished_wave_file
         file: https://github.com/esphome/wake-word-voice-assistants/raw/main/sounds/timer_finished.wav
+      - id: wake_word_triggered_wave_file
+        file: https://github.com/ddilapojr/wake-word-voice-assistants/raw/main/sounds/wake_word_triggered.wav
     on_announcement:
       - if:
           condition:
@@ -117,6 +126,34 @@ voice_assistant:
         green: 0%
         brightness: 100%
         effect: none
+  on_tts_end:
+    - logger.log:
+        format: "TTS Target Media Player value: %s"
+        args: [id(tts_target_media_player).c_str()]
+        level: DEBUG
+    - if:
+        condition:
+          lambda: return !id(tts_target_media_player).empty();
+        then:
+          - logger.log:
+              format: "Routing TTS to remote media player: %s"
+              args: [id(tts_target_media_player).c_str()]
+              level: DEBUG
+          # Stop local playback
+          - media_player.stop:
+              id: echo_media_player
+              announcement: true
+          # Send to remote media player
+          - homeassistant.service:
+              service: media_player.play_media
+              data:
+                entity_id: !lambda return id(tts_target_media_player);
+                media_content_id: !lambda return x;
+                media_content_type: music
+                announce: "true"
+          - logger.log:
+              format: "Sent TTS to remote media player"
+              level: DEBUG
   on_end:
     # Handle the "nevermind" case where there is no announcement
     - wait_until:
@@ -329,6 +366,27 @@ switch:
           announcement: true
       - delay: 15min
       - switch.turn_off: timer_ringing
+
+text:
+  - platform: template
+    name: "TTS target media player"
+    id: tts_target_media_player_text
+    internal: false
+    optimistic: true
+    min_length: 0
+    max_length: 100
+    mode: text
+    entity_category: config
+    restore_value: true
+    initial_value: ""
+    on_value:
+      then:
+        - lambda: |-
+            id(tts_target_media_player) = x;
+        - logger.log:
+            format: "TTS target media player set to: %s"
+            args: [ x.c_str() ]
+            level: DEBUG
 
 select:
   - platform: template
