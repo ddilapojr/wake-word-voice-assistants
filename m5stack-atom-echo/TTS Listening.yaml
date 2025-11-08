@@ -1,0 +1,38 @@
+alias: TTS Listening
+description: >-
+  Turns on input_boolean.tts_responding on when your voice assistant is listening, off when its not.
+triggers:
+  - entity_id:
+      - assist_satellite.{your-assist_satelite-goes-here}
+    trigger: state
+conditions: []
+actions:
+  - choose:
+      - conditions:
+          - condition: state
+            entity_id: assist_satellite.{your-assist_satelite-goes-here}
+            state:
+              - responding
+        sequence:
+          - target:
+              entity_id:
+                - input_boolean.tts_responding
+            action: input_boolean.turn_on
+            data: {}
+        alias: Responding
+      - conditions:
+          - condition: state
+            entity_id: assist_satellite.{your-assist_satelite-goes-here}
+            state:
+              - idle
+              - listening
+              - processing
+              - unavailable
+              - unknown
+        sequence:
+          - action: input_boolean.turn_off
+            data: {}
+            target:
+              entity_id: input_boolean.tts_responding
+        alias: Not Responding
+mode: single
