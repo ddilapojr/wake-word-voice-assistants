@@ -26,13 +26,6 @@ wifi:
 
 captive_portal:
 
-# Add globals for TTS routing
-globals:
-  - id: tts_target_media_player
-    type: std::string
-    restore_value: true
-    initial_value: '""'
-
 button:
   - platform: factory_reset
     id: factory_reset_btn
@@ -59,12 +52,24 @@ speaker:
     dac_type: external
     bits_per_sample: 16bit
     sample_rate: 16000
-    channel: stereo
+    channel: stereo  # The Echo has poor playback audio quality when using mono audio
     buffer_duration: 60ms
+
+# Tracks active conversational session (internal). The UI switch below persists across boots.
+# Also tracks TTS routing target
+globals:
+  - id: conversation_mode
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+  - id: tts_target_media_player
+    type: std::string
+    restore_value: true
+    initial_value: '""'
 
 media_player:
   - platform: speaker
-    name: Media Player
+    name: None
     id: echo_media_player
     announcement_pipeline:
       speaker: echo_speaker
@@ -75,8 +80,6 @@ media_player:
     files:
       - id: timer_finished_wave_file
         file: https://github.com/esphome/wake-word-voice-assistants/raw/main/sounds/timer_finished.wav
-      - id: wake_word_triggered_wave_file
-        file: https://github.com/ddilapojr/wake-word-voice-assistants/raw/main/sounds/wake_word_triggered.wav
     on_announcement:
       - if:
           condition:
@@ -90,9 +93,26 @@ media_player:
           green: 0%
           brightness: 100%
           effect: none
+    # Switch-aware idle behavior:
     on_idle:
-      - script.execute: start_wake_word
-      - script.execute: reset_led
+      - if:
+          condition:
+            lambda: 'return id(conversation_mode);'
+          then:
+            # Conversational: immediately listen for follow-up (no wake word)
+            - delay: 500ms
+            - voice_assistant.start:
+            - script.execute: conversation_timeout_timer
+            - light.turn_on:
+                id: led
+                blue: 100%
+                red: 0%
+                green: 0%
+                effect: "Slow Pulse"
+          else:
+            # Normal: restart wake word and restore LED
+            - script.execute: start_wake_word
+            - script.execute: reset_led
 
 voice_assistant:
   id: va
@@ -104,6 +124,8 @@ voice_assistant:
   media_player: echo_media_player
   noise_suppression_level: 2
   auto_gain: 31dBFS
+  # Keep 5-minute context window in conversational mode; harmless when off
+  conversation_timeout: 300s
   on_listening:
     - light.turn_on:
         id: led
@@ -154,26 +176,36 @@ voice_assistant:
           - logger.log:
               format: "Sent TTS to remote media player"
               level: DEBUG
+
+  # Enter conversational session when wake word hits, if switch is on
+  on_wake_word_detected:
+    - if:
+        condition:
+          switch.is_on: conversational
+        then:
+          - lambda: id(conversation_mode) = true;
+          # Stop wake-word engine depending on location
+          - if:
+              condition:
+                lambda: return id(wake_word_engine_location).state == "On device";
+              then:
+                - micro_wake_word.stop:
+          - if:
+              condition:
+                lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+              then:
+                - lambda: id(va).set_use_wake_word(false);
+          - script.execute: conversation_timeout_timer
+        else:
+          - lambda: id(conversation_mode) = false;
+
+  # Compatible with both modes; media_player.on_idle handles follow-ups or WW restart
   on_end:
-    # Handle the "nevermind" case where there is no announcement
     - wait_until:
         condition:
           - media_player.is_announcing:
         timeout: 0.5s
-    # Restart only mWW if enabled; streaming wake words automatically restart
-    - if:
-        condition:
-          - lambda: return id(wake_word_engine_location).state == "On device";
-        then:
-          - wait_until:
-              - and:
-                  - not:
-                      voice_assistant.is_running:
-                  - not:
-                      speaker.is_playing:
-          - lambda: id(va).set_use_wake_word(false);
-          - micro_wake_word.start:
-    - script.execute: reset_led
+
   on_error:
     - light.turn_on:
         id: led
@@ -183,12 +215,19 @@ voice_assistant:
         brightness: 100%
         effect: none
     - delay: 2s
+    - lambda: id(conversation_mode) = false;
+    - script.stop: conversation_timeout_timer
     - script.execute: reset_led
+
   on_client_connected:
-    - delay: 2s  # Give the api server time to settle
+    - delay: 2s
     - script.execute: start_wake_word
+
   on_client_disconnected:
     - script.execute: stop_wake_word
+    - lambda: id(conversation_mode) = false;
+    - script.stop: conversation_timeout_timer
+
   on_timer_finished:
     - script.execute: stop_wake_word
     - wait_until:
@@ -208,9 +247,8 @@ voice_assistant:
     - switch.turn_off: timer_ringing
 
 binary_sensor:
-  # button does the following:
-  # short click - stop a timer
-  # if no timer then restart either microwakeword or voice assistant continuous
+  # Button:
+  # short click - stop a timer; if no timer then restart wake word/VA as appropriate
   - platform: gpio
     pin:
       number: GPIO39
@@ -262,6 +300,31 @@ light:
           max_brightness: 100%
 
 script:
+  # Sliding window timeout that ends conversational session (stable & simple)
+  - id: conversation_timeout_timer
+    mode: restart
+    then:
+      - delay: 15s
+      - logger.log: "Conversation timeout - returning to wake word mode"
+      - lambda: id(conversation_mode) = false;
+      - voice_assistant.stop:
+      # Restart wake-word engine based on engine location
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "On device";
+          then:
+            - delay: 100ms
+            - lambda: id(va).set_use_wake_word(false);
+            - micro_wake_word.start:
+      - if:
+          condition:
+            lambda: return id(wake_word_engine_location).state == "In Home Assistant";
+          then:
+            - delay: 100ms
+            - lambda: id(va).set_use_wake_word(true);
+            - voice_assistant.start_continuous:
+      - script.execute: reset_led
+
   - id: reset_led
     then:
       - if:
@@ -291,6 +354,7 @@ script:
                       effect: none
                 else:
                   - light.turn_off: led
+
   - id: start_wake_word
     then:
       - if:
@@ -311,6 +375,7 @@ script:
           then:
             - lambda: id(va).set_use_wake_word(true);
             - voice_assistant.start_continuous:
+
   - id: stop_wake_word
     then:
       - if:
@@ -326,6 +391,18 @@ script:
             - micro_wake_word.stop:
 
 switch:
+  # Your new mode toggle (persists across boots; stable & easy)
+  - platform: template
+    name: Conversational
+    id: conversational
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF  # restores last state; defaults OFF if unknown
+    entity_category: config
+    on_turn_on:
+      - lambda: id(conversation_mode) = true;
+    on_turn_off:
+      - lambda: id(conversation_mode) = false;
+
   - platform: template
     name: Use listen light
     id: use_listen_light
@@ -336,12 +413,13 @@ switch:
       - script.execute: reset_led
     on_turn_off:
       - script.execute: reset_led
+
   - platform: template
     id: timer_ringing
     optimistic: true
     restore_mode: ALWAYS_OFF
     on_turn_off:
-      # Turn off the repeat mode and disable the pause between playlist items
+      # Turn off repeat and inter-repeat delay
       - lambda: |-
               id(echo_media_player)
                 ->make_call()
@@ -349,11 +427,10 @@ switch:
                 .set_announcement(true)
                 .perform();
               id(echo_media_player)->set_playlist_delay_ms(speaker::AudioPipelineType::ANNOUNCEMENT, 0);
-      # Stop playing the alarm
       - media_player.stop:
           announcement: true
     on_turn_on:
-      # Turn on the repeat mode and pause for 1000 ms between playlist items/repeats
+      # Repeat alarm with 1000 ms gap
       - lambda: |-
             id(echo_media_player)
               ->make_call()
